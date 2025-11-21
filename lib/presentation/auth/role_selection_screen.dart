@@ -1,24 +1,13 @@
 
+
 import 'package:flutter/material.dart';
 import 'package:mobile_attendance_application/core/themes/role_card.dart';
-import 'package:mobile_attendance_application/data/local_storage/local_storage_impl.dart';
-import 'package:mobile_attendance_application/presentation/auth/login_screen.dart';
-import 'package:mobile_attendance_application/data/repositories/attendance_repository_impl.dart';
 
 class RoleSelectionScreen extends StatelessWidget {
-  final LocalStorageImpl storage;
-  const RoleSelectionScreen({super.key, required this.storage});
+  const RoleSelectionScreen({super.key});
 
-  void _selectRole(BuildContext context, String role) async {
-    await storage.saveSelectedRole(role);
-    final repo = AttendanceRepositoryImpl(localStorage: storage);
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(
-        builder: (_) =>
-            LoginScreen(role: role, storage: storage, repository: repo),
-      ),
-    );
+  void _selectRole(BuildContext context, String role) {
+    Navigator.pushNamedAndRemoveUntil(context, '/login', (route) => false);
   }
 
   @override

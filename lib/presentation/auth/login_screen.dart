@@ -1,23 +1,12 @@
-
-
+import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:mobile_attendance_application/data/local_storage/local_storage_impl.dart';
-import 'package:mobile_attendance_application/data/repositories/attendance_repository_impl.dart';
-import 'package:mobile_attendance_application/domain/repositories/user/user_home_screen.dart';
-import 'package:mobile_attendance_application/presentation/admin/admin_dashboard.dart';
-import 'package:mobile_attendance_application/presentation/auth/register_screen.dart';
+import 'package:http/http.dart' as http;
+import 'package:mobile_attendance_application/data/models/user_model.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class LoginScreen extends StatefulWidget {
-  final String role;
-  final LocalStorageImpl storage;
-  final AttendanceRepositoryImpl repository;
-
-  const LoginScreen({
-    super.key,
-    required this.role,
-    required this.storage,
-    required this.repository,
-  });
+  final String? role;
+  const LoginScreen({super.key, this.role});
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -25,51 +14,97 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
   bool _isLoading = false;
+  bool _isAdmin = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _isAdmin = widget.role == "admin";
+  }
 
   Future<void> _login() async {
+    if (_emailController.text.isEmpty || _passwordController.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter email and password')),
+      );
+      return;
+    }
+
     setState(() => _isLoading = true);
-    final email = _emailController.text.trim();
 
-    final user = widget.storage.getUserByEmailAndRole(email, widget.role);
+    try {
+      final url = Uri.parse(
+        "https://trainerattendence-backed.onrender.com/api/users/login",
+      );
 
-    await Future.delayed(const Duration(seconds: 1));
+      final response = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          "email": _emailController.text.trim(),
+          "password": _passwordController.text.trim(),
+        }),
+      );
 
-    setState(() => _isLoading = false);
+      final data = jsonDecode(response.body);
 
-    if (user == null) {
+      if (response.statusCode == 200 && data['status'] == 'success') {
+        final userJson = data['user'];
+        final user = UserModel.fromJson(userJson);
+
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool('isLoggedIn', true);
+        await prefs.setString('role', user.role!);
+        await prefs.setString('userId', user.userId!);
+        await prefs.setString('name', user.name!);
+        await prefs.setString('email', user.email!);
+        await prefs.setString('department', user.department ?? 'N/A');
+
+        if (_isAdmin && user.role == 'admin') {
+          Navigator.pushNamedAndRemoveUntil(
+            context,
+            '/adminList',
+            (route) => false,
+          );
+        } else if (!_isAdmin && user.role == 'user') {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Welcome ${user.name}')));
+          Navigator.pushNamedAndRemoveUntil(
+            context,
+            '/userHome',
+            arguments: user,
+            (route) => false,
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Invalid login mode. Please check your role.'),
+            ),
+          );
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(data['message'] ?? 'Invalid credentials')),
+        );
+      }
+    } catch (e) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('User not found')));
-    } else {
-      await widget.storage.saveCurrentUser(user);
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => user.role == 'admin'
-              ? AdminDashboard(user: user, repository: widget.repository)
-              : UserHomeScreen(user: user, repository: widget.repository),
-        ),
-      );
+      ).showSnackBar(SnackBar(content: Text('Error: $e')));
+    } finally {
+      setState(() => _isLoading = false);
     }
   }
 
   void _goToRegister() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => RegisterScreen(
-          role: widget.role,
-          storage: widget.storage,
-          repository: widget.repository,
-        ),
-      ),
-    );
+    Navigator.pushNamed(context, '/register');
   }
 
   @override
   Widget build(BuildContext context) {
-    final isAdmin = widget.role == 'admin';
     return Scaffold(
       body: Container(
         width: double.infinity,
@@ -95,9 +130,47 @@ class _LoginScreenState extends State<LoginScreen> {
                 child: Column(
                   children: [
                     Text(
-                      '${isAdmin ? 'Admin' : 'User'} Login',
+                      _isAdmin ? 'Admin Login' : 'User Login',
                       style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.deepPurple,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Welcome Back',
+                      style: TextStyle(
                         fontSize: 26,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF6A11CB),
+                      ),
+                    ),
+                    const SizedBox(height: 25),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.person_outline,
+                          color: Colors.deepPurple,
+                        ),
+                        Switch(
+                          value: _isAdmin,
+                          activeColor: Colors.deepPurple,
+                          onChanged: (value) {
+                            setState(() => _isAdmin = value);
+                          },
+                        ),
+                        const Icon(
+                          Icons.admin_panel_settings_outlined,
+                          color: Colors.deepPurple,
+                        ),
+                      ],
+                    ),
+                    Text(
+                      _isAdmin ? 'Admin Mode' : 'User Mode',
+                      style: const TextStyle(
+                        fontSize: 18,
                         fontWeight: FontWeight.bold,
                         color: Color(0xFF6A11CB),
                       ),
@@ -106,15 +179,26 @@ class _LoginScreenState extends State<LoginScreen> {
                     TextFormField(
                       controller: _emailController,
                       decoration: const InputDecoration(
-                        labelText: 'Email',
-                        prefixIcon: Icon(Icons.email),
+                        labelText: 'Email Address',
+                        prefixIcon: Icon(Icons.email_outlined),
                         border: OutlineInputBorder(),
                       ),
                     ),
-                    const SizedBox(height: 24),
+                    const SizedBox(height: 20),
+                    TextFormField(
+                      controller: _passwordController,
+                      obscureText: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Password',
+                        prefixIcon: Icon(Icons.lock_outline),
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 30),
                     ElevatedButton(
                       onPressed: _isLoading ? null : _login,
                       style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.deepPurple,
                         padding: const EdgeInsets.symmetric(
                           horizontal: 50,
                           vertical: 16,
@@ -122,15 +206,13 @@ class _LoginScreenState extends State<LoginScreen> {
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(16),
                         ),
-                        backgroundColor: Colors.deepPurple,
-                        shadowColor: Colors.black54,
                         elevation: 8,
                       ),
                       child: _isLoading
                           ? const CircularProgressIndicator(color: Colors.white)
-                          : const Text(
-                              'Login',
-                              style: TextStyle(
+                          : Text(
+                              'Login ${_isAdmin ? 'Admin' : 'User'}',
+                              style: const TextStyle(
                                 fontSize: 18,
                                 color: Colors.white,
                                 fontWeight: FontWeight.bold,
@@ -141,7 +223,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     TextButton(
                       onPressed: _goToRegister,
                       child: const Text(
-                        'Create an account',
+                        "Don't have an account? Register here",
                         style: TextStyle(
                           fontSize: 16,
                           decoration: TextDecoration.underline,
@@ -162,6 +244,7 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   void dispose() {
     _emailController.dispose();
+    _passwordController.dispose();
     super.dispose();
   }
 }
