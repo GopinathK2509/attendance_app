@@ -1,79 +1,142 @@
-import 'dart:async';
+
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart' hide Location;
+import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
+import 'package:mobile_attendance_application/core/themes/user_notifier.dart';
+import 'package:shimmer/shimmer.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:mobile_attendance_application/data/models/attendance_model.dart';
 import 'package:mobile_attendance_application/data/models/user_model.dart';
+import 'package:mobile_attendance_application/presentation/settings/settings_screen.dart';
 import 'package:mobile_attendance_application/presentation/widgets/logout_dialog.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'attendance_list_screen.dart';
 
 class UserHomeScreen extends StatefulWidget {
   final UserModel user;
+  final ValueNotifier<String?> profileImageUrl;
 
-  const UserHomeScreen({super.key, required this.user});
+  const UserHomeScreen({
+    super.key,
+    required this.user,
+    required this.profileImageUrl,
+  });
 
   @override
   State<UserHomeScreen> createState() => _UserHomeScreenState();
 }
 
-class _UserHomeScreenState extends State<UserHomeScreen> {
+class _UserHomeScreenState extends State<UserHomeScreen>
+    with WidgetsBindingObserver {
   AttendanceModel? todayAttendance;
+  UserModel? currentUser;
 
-  late UserModel currentUser;
-
-  String? latitude;
-  String? longitude;
   String? address;
   bool mode = true;
+
+  bool isLoading = true;
+  bool isLoadingAttendance = true;
 
   @override
   void initState() {
     super.initState();
-    _init();
+    WidgetsBinding.instance.addObserver(this);
+    _loadAll();
   }
 
-  Future<void> _init() async {
-    await initializeUser();
-    await fetchTodayAttendance();
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _loadAll();
+    }
   }
 
-  Future<void> initializeUser() async {
-    final prefs = await SharedPreferences.getInstance();
+  Future<void> _loadAll() async {
     setState(() {
-      currentUser = UserModel(
-        userId: widget.user.userId ?? prefs.getString('userId'),
-        name: widget.user.name ?? prefs.getString('name'),
-        email: widget.user.email ?? prefs.getString('email'),
-        department: widget.user.department ?? prefs.getString('department'),
-        role: widget.user.role ?? prefs.getString('role'),
-      );
+      isLoading = true;
+      isLoadingAttendance = true;
+    });
+
+    await _initializeUser();
+    await _fetchTodayAttendance();
+
+    setState(() {
+      isLoading = false;
+      isLoadingAttendance = false;
     });
   }
 
-  Future<void> fetchTodayAttendance() async {
+  Future<void> _initializeUser() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    currentUser = UserModel(
+      userId: prefs.getString('userId') ?? widget.user.userId,
+      name: prefs.getString('name') ?? widget.user.name,
+      email: prefs.getString('email') ?? widget.user.email,
+      department: prefs.getString('department') ?? widget.user.department,
+      role: prefs.getString('role') ?? widget.user.role,
+    );
+
+    widget.profileImageUrl.value =
+        "https://trainerattendence-backed.onrender.com/api/users/photo/${currentUser!.userId}";
+  }
+
+
+  Future<void> _fetchTodayAttendance() async {
+    if (currentUser == null) return;
+
+    setState(() => isLoadingAttendance = true);
+
     try {
       final url = Uri.parse(
-        "https://trainerattendence-backed.onrender.com/api/attendance/user/${widget.user.userId}/today",
+        "https://trainerattendence-backed.onrender.com/api/attendance/user/${currentUser!.userId}",
       );
+
       final response = await http.get(url);
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        setState(() {
-          todayAttendance = data != null
-              ? AttendanceModel.fromJson(data)
-              : null;
-          if (todayAttendance != null &&
-              todayAttendance!.checkOutTime == null) {}
-        });
+      if (response.statusCode == 200 && response.body.isNotEmpty) {
+        dynamic decoded;
+
+        try {
+          decoded = jsonDecode(response.body);
+        } catch (e) {
+          debugPrint("JSON decode error: $e");
+          todayAttendance = null;
+          return;
+        }
+        if (decoded is List && decoded.isNotEmpty) {
+          final now = DateTime.now();
+
+          final todaysRecords = decoded.where((item) {
+            try {
+              final dt = DateTime.parse(item["date"] ?? item["checkInTime"]);
+              return dt.year == now.year &&
+                  dt.month == now.month &&
+                  dt.day == now.day;
+            } catch (_) {
+              return false;
+            }
+          }).toList();
+
+          if (todaysRecords.isNotEmpty) {
+            todayAttendance = AttendanceModel.fromJson(todaysRecords.last);
+          } else {
+            todayAttendance = null; 
+          }
+        } else if (decoded is Map<String, dynamic>) {
+          todayAttendance = AttendanceModel.fromJson(decoded);
+        } else {
+          todayAttendance = null;
+        }
+      } else {
+        todayAttendance = null;
       }
     } catch (e) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(e.toString())));
+      debugPrint("Fetch today attendance error: $e");
+      todayAttendance = null;
+    } finally {
+      setState(() => isLoadingAttendance = false);
     }
   }
 
@@ -88,7 +151,6 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
         throw Exception('Location permissions are denied.');
       }
     }
-
     if (permission == LocationPermission.deniedForever) {
       throw Exception('Location permissions are permanently denied.');
     }
@@ -100,34 +162,37 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
 
   Future<void> _getAddress(Position pos) async {
     try {
-      List<Placemark> placemarks = await placemarkFromCoordinates(
+      final placemarks = await placemarkFromCoordinates(
         pos.latitude,
         pos.longitude,
       );
+
       if (placemarks.isNotEmpty) {
         final p = placemarks.first;
-        setState(() {
-          latitude = pos.latitude.toStringAsFixed(6);
-          longitude = pos.longitude.toStringAsFixed(6);
-          address =
-              '${p.name}, ${p.subLocality}, ${p.locality}, ${p.postalCode}, ${p.country}';
-        });
+        address =
+            '${p.name}, ${p.subLocality}, ${p.locality}, ${p.postalCode}, ${p.country}';
+      } else {
+        address = 'Address not available';
       }
     } catch (_) {
-      setState(() => address = 'Could not fetch address');
+      address = 'Could not fetch address';
     }
   }
 
-  Future<void> checkIn() async {
+  Future<void> _checkIn() async {
+    if (currentUser == null) return;
+
     try {
-      Position pos = await _determinePosition();
+      setState(() => isLoadingAttendance = true);
+
+      final pos = await _determinePosition();
       await _getAddress(pos);
 
       final body = {
-        "userId": widget.user.userId ?? "unknown",
-        "name": widget.user.name ?? "User",
-        "department": widget.user.department ?? "N/A",
-        "mode": mode,
+        "userId": currentUser!.userId,
+        "name": currentUser!.name ?? "",
+        "department": currentUser!.department ?? "",
+        "checkInMode": mode,
         "checkInLatitude": pos.latitude,
         "checkInLongitude": pos.longitude,
         "checkInAddress": address,
@@ -141,39 +206,54 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
         body: jsonEncode(body),
       );
 
-      if (response.statusCode == 200) {
-        setState(() {
-          todayAttendance = AttendanceModel.fromJson(jsonDecode(response.body));
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              "Checked in (${mode ? 'Online' : 'Offline'}) successfully",
-            ),
-          ),
-        );
-      } else {
-        throw Exception("Check-in failed (${response.statusCode})");
+      debugPrint("Check-In Response: ${response.body}");
+
+      dynamic decoded;
+
+      try {
+        decoded = jsonDecode(response.body);
+      } catch (_) {
+        decoded = null;
       }
+
+      if (decoded is List && decoded.isNotEmpty) {
+        todayAttendance = AttendanceModel.fromJson(decoded.last);
+      }
+      else if (decoded is Map<String, dynamic>) {
+        todayAttendance = AttendanceModel.fromJson(decoded);
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            "Checked in Successfully(${mode ? 'Online' : 'Offline'})",
+          ),
+        ),
+      );
+      await _fetchTodayAttendance();
     } catch (e) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text("Error: $e")));
+    } finally {
+      setState(() => isLoadingAttendance = false);
     }
   }
 
-  Future<void> checkOut() async {
+  Future<void> _checkOut() async {
     if (todayAttendance == null) return;
 
     try {
-      Position pos = await _determinePosition();
+      setState(() => isLoadingAttendance = true);
+
+      final pos = await _determinePosition();
       await _getAddress(pos);
 
       final body = {
         "userId": todayAttendance!.userId,
-        "name": todayAttendance!.userName,
-        "department": todayAttendance!.department,
-        "mode": mode,
+        "name": todayAttendance!.userName ?? "",
+        "department": todayAttendance!.department ?? "",
+        "checkOutMode": mode,
         "checkOutLatitude": pos.latitude,
         "checkOutLongitude": pos.longitude,
         "checkOutAddress": address,
@@ -187,38 +267,451 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
         body: jsonEncode(body),
       );
 
-      if (response.statusCode == 200) {
-        setState(() {
-          todayAttendance = AttendanceModel.fromJson(jsonDecode(response.body));
-        });
+      debugPrint("Check-Out Response: ${response.body}");
 
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              "Checked Out (${mode ? 'Online' : 'Offline'}) successfully",
-            ),
-          ),
-        );
-      } else {
-        throw Exception("Check-out failed (${response.statusCode})");
+      dynamic decoded;
+
+      try {
+        decoded = jsonDecode(response.body);
+      } catch (_) {
+        decoded = null;
       }
+
+      if (decoded is List && decoded.isNotEmpty) {
+        todayAttendance = AttendanceModel.fromJson(decoded.last);
+      } else if (decoded is Map<String, dynamic>) {
+        todayAttendance = AttendanceModel.fromJson(decoded);
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            "Checked Out Successfully(${mode ? 'Online' : 'Offline'})",
+          ),
+        ),
+      );
+      await _fetchTodayAttendance();
     } catch (e) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text("Error: $e")));
+    } finally {
+      setState(() => isLoadingAttendance = false);
     }
   }
 
-  String formatDuration(Duration d) =>
-      "${d.inHours.toString().padLeft(2, '0')}:${(d.inMinutes % 60).toString().padLeft(2, '0')}:${(d.inSeconds % 60).toString().padLeft(2, '0')}";
+  String formatDuration(Duration? d) => d != null
+      ? "${d.inHours.toString().padLeft(2, '0')}:${(d.inMinutes % 60).toString().padLeft(2, '0')}:${(d.inSeconds % 60).toString().padLeft(2, '0')}"
+      : 'N/A';
 
-  String formatDate(DateTime dt) =>
-      "${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} "
-      "${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}";
+  String formatDate(DateTime? dt) => dt != null
+      ? "${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} "
+            "${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}"
+      : 'N/A';
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  Widget _buildShimmerHeader() {
+    return Shimmer.fromColors(
+      baseColor: Colors.deepPurple.shade200,
+      highlightColor: Colors.deepPurple.shade50,
+      period: const Duration(milliseconds: 1100),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(
+            colors: [Colors.deepPurple.shade400, Colors.deepPurpleAccent],
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(height: 18, width: 120, color: Colors.white),
+            const SizedBox(height: 8),
+            Container(height: 12, width: 200, color: Colors.white),
+            const SizedBox(height: 8),
+            Container(height: 12, width: 160, color: Colors.white),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeaderCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF7B2FF7), Color(0xFF9E7BFF)],
+        ),
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.deepPurple.withOpacity(0.12),
+            blurRadius: 12,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          ValueListenableBuilder<String?>(
+            valueListenable: widget.profileImageUrl,
+            builder: (context, imageUrl, _) {
+              return CircleAvatar(
+                radius: 36,
+                backgroundColor: Colors.white,
+                backgroundImage: imageUrl != null
+                    ? NetworkImage(imageUrl)
+                    : null,
+                child: imageUrl == null
+                    ? const Icon(
+                        Icons.person,
+                        size: 36,
+                        color: Colors.deepPurple,
+                      )
+                    : null,
+              );
+            },
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ValueListenableBuilder<UserModel?>(
+                  valueListenable: globalUser,
+                  builder: (context, user, _) {
+                    return Text(
+                      user?.name ?? widget.user.name ?? 'User',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    );
+                  },
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  currentUser?.email ?? widget.user.email ?? 'example@mail.com',
+                  style: const TextStyle(color: Colors.white70),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  "Dept: ${currentUser?.department ?? 'N/A'}",
+                  style: const TextStyle(color: Colors.white70),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildModeCard() {
+    return Card(
+      elevation: 3,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 20),
+        child: Column(
+          children: [
+            const Text(
+              "Select Attendance Mode",
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Radio<bool>(
+                  value: true,
+                  groupValue: mode,
+                  onChanged: (v) => setState(() => mode = v!),
+                  activeColor: Colors.deepPurple,
+                ),
+                const SizedBox(width: 6),
+                const Text(
+                  "Online",
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(width: 30),
+                Radio<bool>(
+                  value: false,
+                  groupValue: mode,
+                  onChanged: (v) => setState(() => mode = v!),
+                  activeColor: Colors.deepPurple,
+                ),
+                const SizedBox(width: 6),
+                const Text(
+                  "Offline",
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAttendanceDetails() {
+    if (isLoadingAttendance) {
+      return Column(
+        children: [
+          const SizedBox(height: 8),
+          Shimmer.fromColors(
+            baseColor: Colors.grey.shade300,
+            highlightColor: Colors.grey.shade100,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(height: 14, width: 200, color: Colors.white),
+                const SizedBox(height: 10),
+                Container(height: 12, width: 150, color: Colors.white),
+                const SizedBox(height: 12),
+                Container(height: 12, width: 250, color: Colors.white),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+
+    if (todayAttendance == null) {
+      return Column(
+        children: [
+          const Text(
+            "No attendance record for today",
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+          ),
+          const SizedBox(height: 16),
+          ElevatedButton.icon(
+            onPressed: _checkIn,
+            icon: const Icon(Icons.login, color: Colors.white),
+            label: const Text(
+              "Check In",
+              style: TextStyle(color: Colors.white),
+            ),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF7B2FF7),
+              padding: const EdgeInsets.symmetric(horizontal: 36, vertical: 12),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Card(
+      elevation: 3,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.login, color: Colors.deepPurple, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    "Check-in: ${formatDate(todayAttendance!.checkInTime)}",
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            if (todayAttendance!.checkInMode != null)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: todayAttendance!.checkInMode!
+                      ? Colors.green
+                      : Colors.grey,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      todayAttendance!.checkInMode!
+                          ? Icons.wifi
+                          : Icons.wifi_off,
+                      size: 14,
+                      color: Colors.white,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      todayAttendance!.checkInMode! ? 'Online' : 'Offline',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 8),
+            if (todayAttendance!.checkInAddress != null)
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(
+                    Icons.location_on,
+                    color: Colors.deepPurpleAccent,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      todayAttendance!.checkInAddress!,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        color: Colors.black87,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            const Divider(height: 20, thickness: 1),
+
+            if (todayAttendance!.checkOutTime != null) ...[
+              Row(
+                children: [
+                  const Icon(Icons.login, color: Colors.deepPurple, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      "Check-Out: ${formatDate(todayAttendance!.checkOutTime)}",
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              if (todayAttendance!.checkOutMode != null)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: todayAttendance!.checkOutMode!
+                        ? Colors.green
+                        : Colors.grey,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        todayAttendance!.checkOutMode!
+                            ? Icons.wifi
+                            : Icons.wifi_off,
+                        size: 14,
+                        color: Colors.white,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        todayAttendance!.checkOutMode! ? 'Online' : 'Offline',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              const SizedBox(height: 6),
+              if (todayAttendance!.checkOutAddress != null)
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(
+                      Icons.location_on,
+                      color: Colors.redAccent,
+                      size: 18,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        todayAttendance!.checkOutAddress!,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          color: Colors.black87,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              const SizedBox(height: 8),
+              Text(
+                "Duration: ${formatDuration(todayAttendance!.duration)}",
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+
+            const SizedBox(height: 16),
+
+            Center(
+              child: todayAttendance!.checkOutTime == null
+                  ? ElevatedButton.icon(
+                      onPressed: _checkOut,
+                      icon: const Icon(Icons.logout, color: Colors.white),
+                      label: const Text(
+                        "Check Out",
+                        style: TextStyle(color: Colors.white),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.redAccent,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 36,
+                          vertical: 12,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    )
+                  : const Text(
+                      "✅ Attendance Completed",
+                      style: TextStyle(
+                        color: Colors.green,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -227,284 +720,54 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
       backgroundColor: Colors.deepPurple.shade50,
       appBar: AppBar(
         elevation: 0,
-        title: Text('Welcome, ${widget.user.name ?? ""} 👋'),
+        title: ValueListenableBuilder<UserModel?>(
+          valueListenable: globalUser,
+          builder: (context, user, _) {
+            final displayName = user?.name ?? widget.user.name ?? 'User';
+            return Text('Welcome, $displayName');
+          },
+        ),
         centerTitle: true,
         backgroundColor: Colors.deepPurple,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.logout, color: Colors.white),
-            onPressed: () => LogoutDialog.show(context),
-          ),
-        ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          children: [
-            Container(
-              width: double.infinity,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [Colors.deepPurple, Colors.deepPurpleAccent],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    widget.user.name ?? "",
-                    style: const TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
+      body: RefreshIndicator(
+        onRefresh: _loadAll,
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            children: [
+              isLoading ? _buildShimmerHeader() : _buildHeaderCard(),
+              const SizedBox(height: 24),
+              _buildModeCard(),
+              const SizedBox(height: 20),
+              _buildAttendanceDetails(),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => AttendanceListScreen(user: widget.user),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.history),
+                  label: const Text('View Attendance History'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.teal,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
                     ),
                   ),
-                  const SizedBox(height: 6),
-                  Text(
-                    widget.user.email ?? "",
-                    style: const TextStyle(color: Colors.white70),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    "Dept: ${widget.user.department ?? "N/A"}",
-                    style: const TextStyle(color: Colors.white70),
-                  ),
-                ],
-              ),
-            ),
-
-            const SizedBox(height: 25),
-
-            Card(
-              elevation: 3,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(15),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 20,
-                  vertical: 15,
-                ),
-                child: Column(
-                  children: [
-                    const Text(
-                      "Select Attendance Mode",
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Radio<bool>(
-                          value: true,
-                          groupValue: mode,
-                          onChanged: (v) => setState(() => mode = v!),
-                          activeColor: Colors.deepPurple,
-                        ),
-                        const Text(
-                          "Online",
-                          style: TextStyle(fontWeight: FontWeight.w500),
-                        ),
-                        const SizedBox(width: 30),
-                        Radio<bool>(
-                          value: false,
-                          groupValue: mode,
-                          onChanged: (v) => setState(() => mode = v!),
-                          activeColor: Colors.deepPurple,
-                        ),
-                        const Text(
-                          "Offline",
-                          style: TextStyle(fontWeight: FontWeight.w500),
-                        ),
-                      ],
-                    ),
-                  ],
                 ),
               ),
-            ),
-
-            const SizedBox(height: 25),
-
-            Card(
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(15),
-              ),
-              elevation: 4,
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (todayAttendance != null) ...[
-                      Row(
-                        children: [
-                          const Icon(
-                            Icons.login,
-                            size: 18,
-                            color: Colors.deepPurple,
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            "Check-in: ${formatDate(todayAttendance!.checkInTime)}",
-                            style: const TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        "Check-in Mode: ${todayAttendance?.checkInMode == true ? 'Online' : 'Offline'}",
-                      ),
-
-                      if (todayAttendance!.checkInAddress != null)
-                        Row(
-                          children: [
-                            const Icon(
-                              Icons.location_on,
-                              size: 18,
-                              color: Colors.deepPurpleAccent,
-                            ),
-                            const SizedBox(width: 4),
-                            Expanded(
-                              child: Text(
-                                "Check-in Address: ${todayAttendance!.checkInAddress}",
-                              ),
-                            ),
-                          ],
-                        ),
-                      const SizedBox(height: 8),
-                      if (todayAttendance!.checkOutTime != null) ...[
-                        Row(
-                          children: [
-                            const Icon(
-                              Icons.logout,
-                              size: 18,
-                              color: Colors.redAccent,
-                            ),
-                            const SizedBox(width: 6),
-                            Text(
-                              "Check-out: ${formatDate(todayAttendance!.checkOutTime!)}",
-                              style: const TextStyle(
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          "Check-out Mode: ${todayAttendance?.checkOutMode == true ? 'Online' : 'Offline'}",
-                        ),
-
-                        if (todayAttendance!.checkOutAddress != null)
-                          Row(
-                            children: [
-                              const Icon(
-                                Icons.location_on,
-                                size: 18,
-                                color: Colors.redAccent,
-                              ),
-                              const SizedBox(width: 4),
-                              Expanded(
-                                child: Text(
-                                  "Check-out Address: ${todayAttendance!.checkOutAddress}",
-                                ),
-                              ),
-                            ],
-                          ),
-                        const SizedBox(height: 4),
-                        Text(
-                          "Duration: ${formatDuration(todayAttendance!.duration)}",
-                        ),
-                      ],
-                      const SizedBox(height: 15),
-                    ],
-                    todayAttendance == null
-                        ? Center(
-                            child: ElevatedButton.icon(
-                              onPressed: checkIn,
-                              icon: const Icon(
-                                Icons.login,
-                                color: Colors.white,
-                              ),
-                              label: const Text(
-                                "Check In",
-                                style: TextStyle(color: Colors.white),
-                              ),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.deepPurple,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 40,
-                                  vertical: 15,
-                                ),
-                              ),
-                            ),
-                          )
-                        : todayAttendance!.checkOutTime == null
-                        ? Center(
-                            child: ElevatedButton.icon(
-                              onPressed: checkOut,
-                              icon: const Icon(Icons.logout),
-                              label: const Text("Check Out"),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.redAccent,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 40,
-                                  vertical: 15,
-                                ),
-                              ),
-                            ),
-                          )
-                        : const Center(
-                            child: Text(
-                              "✅ Attendance Completed",
-                              style: TextStyle(
-                                color: Colors.green,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                  ],
-                ),
-              ),
-            ),
-
-            const SizedBox(height: 25),
-
-            ElevatedButton.icon(
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => AttendanceListScreen(user: widget.user),
-                  ),
-                );
-              },
-              icon: const Icon(Icons.history),
-              label: const Text('View Attendance History'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.teal,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 50,
-                  vertical: 15,
-                ),
-              ),
-            ),
-          ],
+              const SizedBox(height: 40),
+            ],
+          ),
         ),
       ),
       drawer: Drawer(
@@ -513,11 +776,33 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
           children: [
             UserAccountsDrawerHeader(
               decoration: const BoxDecoration(color: Colors.deepPurple),
-              accountName: Text(widget.user.name ?? 'User'),
-              accountEmail: Text(widget.user.email ?? 'No Email'),
-              currentAccountPicture: const CircleAvatar(
-                backgroundColor: Colors.white,
-                child: Icon(Icons.person, size: 40, color: Colors.deepPurple),
+              accountName: ValueListenableBuilder<UserModel?>(
+                valueListenable: globalUser,
+                builder: (context, user, _) {
+                  final displayName = user?.name ?? widget.user.name ?? 'User';
+                  return Text(displayName);
+                },
+              ),
+              accountEmail: Text(
+                currentUser?.email ?? widget.user.email ?? 'example@mail.com',
+              ),
+              currentAccountPicture: ValueListenableBuilder<String?>(
+                valueListenable: widget.profileImageUrl,
+                builder: (context, imageUrl, _) {
+                  return CircleAvatar(
+                    backgroundColor: Colors.white,
+                    backgroundImage: imageUrl != null
+                        ? NetworkImage(imageUrl)
+                        : null,
+                    child: imageUrl == null
+                        ? const Icon(
+                            Icons.person,
+                            size: 40,
+                            color: Colors.deepPurple,
+                          )
+                        : null,
+                  );
+                },
               ),
             ),
             ListTile(
@@ -533,6 +818,21 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
                   context,
                   MaterialPageRoute(
                     builder: (_) => AttendanceListScreen(user: widget.user),
+                  ),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.settings),
+              title: const Text('Settings'),
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => UserSettingsScreen(
+                      user: widget.user,
+                      profileImageUrl: widget.profileImageUrl,
+                    ),
                   ),
                 );
               },

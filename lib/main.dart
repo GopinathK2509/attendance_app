@@ -76,7 +76,6 @@ import 'package:mobile_attendance_application/presentation/auth/login_screen.dar
 import 'package:mobile_attendance_application/domain/repositories/user/user_home_screen.dart';
 import 'package:mobile_attendance_application/presentation/admin/admin_user_list_screen.dart';
 import 'package:mobile_attendance_application/presentation/auth/register_screen.dart';
-import 'package:mobile_attendance_application/presentation/auth/role_selection_screen.dart';
 import 'package:mobile_attendance_application/presentation/auth/splash_screen.dart';
 
 void main() async {
@@ -102,12 +101,18 @@ class MyApp extends StatelessWidget {
         '/register': (_) => const RegisterScreen(),
         '/adminDashboard': (_) => const AdminDashboardScreen(),
         '/adminAttendanceHistory': (_) => const AdminAttendanceHistoryScreen(),
-        '/roleSelection': (_) => const RoleSelectionScreen(),
+        //'/roleSelection': (_) => const RoleSelectionScreen(),
       },
       onGenerateRoute: (settings) {
         if (settings.name == '/userHome') {
           final user = settings.arguments as UserModel;
-          return MaterialPageRoute(builder: (_) => UserHomeScreen(user: user));
+          final profileImageUrl = ValueNotifier<String?>(
+            "https://trainerattendence-backed.onrender.com/api/users/photo/${user.userId}",
+          );
+          return MaterialPageRoute(
+            builder: (_) =>
+                UserHomeScreen(user: user, profileImageUrl: profileImageUrl),
+          );
         }
         return null;
       },
